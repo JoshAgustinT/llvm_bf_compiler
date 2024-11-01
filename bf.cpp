@@ -33,8 +33,6 @@ Function *mainFunction;
 
 Value *middlePtr;
 
-
-
 string cell_pointer_var = "middle";
 
 vector<char> program_file;
@@ -130,78 +128,45 @@ void bf_assembler(char token)
         break;
     case ',':
 
-        // Move the file pointer for stdin into the %rdi register
-        jasm("movq    stdin(%rip), %rdi");
+    {
+        // Create a prototype for getchar (int getchar())
+        FunctionType *getcharType = FunctionType::get(Type::getInt32Ty(*TheContext), false);
+        FunctionCallee getcharFunction = TheModule->getOrInsertFunction("getchar", getcharType);
 
-        // Call the getc function to read a character from stdin (returned in %al)
-        jasm("call    getc@PLT");
-        // Move the byte from %al into %bl
-        jasm("movb    %al, %bl");
-        // Load the pointer from -8(%rbp) into %rax
-        jasm("movq    -8(%rbp), %rax");
+        // Call getchar to read a character from stdin
+        // Call getchar to read a character from stdin
+        Value *inputChar = Builder->CreateCall(getcharFunction, {}, "inputChar");
 
-        // Store the byte from %bl into the memory pointed to by %rax
-        jasm("movb    %bl, (%rax)");
+        // Truncate the returned int32 to int8 if needed (for 8-bit storage)
+        Value *truncatedInput = Builder->CreateTrunc(inputChar, Type::getInt8Ty(*TheContext), "truncatedInput");
 
-        // char nextByte;
-        // cin.get(nextByte);
-        // tape[tape_position] = nextByte;
-        break;
+        // Store the character at the location pointed to by middlePtr
+        Builder->CreateStore(truncatedInput, middlePtr);
+    }
+    break;
 
-    case '[': {
-    loop_num++;
-    myStack.push(loop_num);
+    case '[':
+    {
+        loop_num++;
+        myStack.push(loop_num);
 
-    // Generate unique loop labels
-    std::string start_label = "start_loop_" + std::to_string(loop_num);
-    std::string end_label = "end_loop_" + std::to_string(loop_num);
+        // Generate unique loop labels
+        std::string start_label = "start_loop_" + std::to_string(loop_num);
+        std::string end_label = "end_loop_" + std::to_string(loop_num);
+    }
+    break;
 
-    // Create a block for the start of the loop
-    BasicBlock *loopStart = BasicBlock::Create(*TheContext, start_label, mainFunction);
-    Builder->CreateBr(loopStart); // Jump to the start of the loop
+    case ']':
+    {
+        // Retrieve the loop number from the stack
+        int match_loop = myStack.top();
+        myStack.pop();
 
-    // Now set the insertion point to the start of the loop
-    // Builder->SetInsertPoint(loopStart);
-
-    // Load the current value at `middlePtr`
-    Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadValue");
-
-    // Compare the value to 0 and branch to the end label if zero
-    Value *cond = Builder->CreateICmpEQ(currentValue, Builder->getInt8(0), "cmpZero");
-    BasicBlock *loopEnd = BasicBlock::Create(*TheContext, end_label, mainFunction);
-    Builder->CreateCondBr(cond, loopEnd, loopStart); // If zero, jump to end of loop
-
-    // Insert the end block for the loop
-    //Builder->SetInsertPoint(loopEnd);
-
-} break;
-
-case ']': {
-    // Retrieve the loop number from the stack
-     int match_loop = myStack.top();
-     myStack.pop();
-
-    // // Generate unique loop labels
-     std::string start_label = "start_loop_" + std::to_string(match_loop);
-     std::string end_label = "end_loop_" + std::to_string(match_loop);
-
-    // // Create a block for the end of the loop
-
-    // // Load the current value at `middlePtr`
-     Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadValue");
-
-    // // Compare the value to 0 and branch back to the start label if not zero
-     Value *cond = Builder->CreateICmpNE(currentValue, Builder->getInt8(0), "cmpNonZero");
-     BasicBlock *loopStart = BasicBlock::Create(*TheContext, start_label, mainFunction);
-    BasicBlock *loopEnd = Builder->GetInsertBlock(); // Get the current end block
-     Builder->CreateCondBr(cond, loopStart, loopEnd); // If not zero, jump back to start
-
-
-    // // Set the insert point to the end of the loop block
-    // Builder->SetInsertPoint(loopEnd);
-
-} break;
-
+        // Generate unique loop labels based on the matched loop number
+        std::string start_label = "start_loop_" + std::to_string(match_loop);
+        std::string end_label = "end_loop_" + std::to_string(match_loop);
+    }
+    break;
 
     default:
         // non bf instruction, so we ignore
@@ -1115,7 +1080,7 @@ int main(int argc, char *argv[])
     if (verifyModule(*TheModule, &errs()))
     {
         errs() << "Error: Module verification failed.\n";
-            TheModule->print(outs(), nullptr);
+        TheModule->print(outs(), nullptr);
 
         return 23;
     }
