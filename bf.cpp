@@ -20,19 +20,22 @@ written for adv compilers course
 #include "llvm/IR/Verifier.h"
 #include "llvm/IR/Type.h"
 
-
-
 using namespace std;
 using namespace llvm;
 
-//Cursed...
-// Initialize LLVM components
+// Cursed...
+//  Initialize LLVM components
 static std::unique_ptr<LLVMContext> TheContext = std::make_unique<LLVMContext>();
 static std::unique_ptr<IRBuilder<>> Builder = std::make_unique<IRBuilder<>>(*TheContext);
 static std::unique_ptr<Module> TheModule = std::make_unique<Module>("module", *TheContext);
 
-AllocaInst *middlePtrVar = nullptr;
+Function *mainFunction;
 
+Value *middlePtr;
+
+
+
+string cell_pointer_var = "middle";
 
 vector<char> program_file;
 ofstream *output_file;
@@ -69,43 +72,52 @@ void bf_assembler(char token)
     {
     case '>':
 
-        // move our pointer to the right, note it's an i8
-        
+        // move our pointer to the right,
+        {
+            Value *nextPtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(1), "moveRight");
+            middlePtr = nextPtr; // Update `middlePtr` to the new position
+        }
         break;
     case '<':
-        // move our pointer to the left, 
-      
+        // move our pointer to the left,
+        {
+            Value *prevPtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(-1), "moveLeft");
+            middlePtr = prevPtr;
+        }
         break;
     case '+':
     {
-        // add 1, to what's at the pointer. it's an i8 operation
-        // Load the current value
-            Value *currentValue = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtrVar, "currentValue");
-            // Increment the value
-            Value *incrementedValue = Builder->CreateAdd(currentValue, Builder->getInt8(1), "incrementedValue");
-            // Store the incremented value back
-            Builder->CreateStore(incrementedValue, middlePtrVar);
+        // load what's at that variable, then add 1 to it. note that it's an i8 operation
+        // Load the current value at `middlePtr`
+        Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadCurrent");
+
+        // Increment by 1
+        Value *incrementedValue = Builder->CreateAdd(currentValue, Builder->getInt8(1), "increment");
+
+        // Store the incremented value back at `middlePtr`
+        Builder->CreateStore(incrementedValue, middlePtr);
     }
-        break;
-    case '-':   
+    break;
+    case '-':
     {
-       // sub 1, to what's at the pointer. it's an i8 operation
-         // Load the current value
-            Value *currentValue = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtrVar, "currentValue");
-            // Decrement the value
-            Value *decrementedValue = Builder->CreateSub(currentValue, Builder->getInt8(1), "decrementedValue");
-            // Store the decremented value back
-            Builder->CreateStore(decrementedValue, middlePtrVar);
+        // load what's at that variable, then sub 1 to it. note that it's an i8 operation
+        Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadCurrent");
+
+        // Decrement by 1
+        Value *decrementedValue = Builder->CreateSub(currentValue, Builder->getInt8(1), "decrement");
+
+        // Store the decremented value back at `middlePtr`
+        Builder->CreateStore(decrementedValue, middlePtr);
     }
 
-        break;
+    break;
     case '.':
 
-        //print what's at the pointer, it's an i8
-        // Load the value to print
+        // print what's at the pointer, it's an i8
+        //  Load the value to print
         {
-           // Load the value to print
-            Value *valueToPrint = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtrVar, "valueToPrint");
+            // Load the value to print
+            Value *valueToPrint = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "valueToPrint");
 
             // Create a prototype for putchar (int putchar(int))
             FunctionType *putcharType = FunctionType::get(Type::getInt32Ty(*TheContext), Type::getInt8Ty(*TheContext), false);
@@ -113,8 +125,7 @@ void bf_assembler(char token)
 
             // Call putchar with the loaded value
             Builder->CreateCall(putcharFunction, valueToPrint);
-        }   
-            
+        }
 
         break;
     case ',':
@@ -136,51 +147,62 @@ void bf_assembler(char token)
         // cin.get(nextByte);
         // tape[tape_position] = nextByte;
         break;
-    case '[':
-    {
-        loop_num++;
-        myStack.push(loop_num);
 
-        string start_label = "start_loop_";
-        start_label += to_string(loop_num);
-        string end_label = "end_loop_";
-        end_label += to_string(loop_num);
+    case '[': {
+    loop_num++;
+    myStack.push(loop_num);
 
-        jasm(start_label + ":");
-        // Load the pointer from -8(%rbp) into %rax
-        jasm("movq    -8(%rbp), %rax");
+    // Generate unique loop labels
+    std::string start_label = "start_loop_" + std::to_string(loop_num);
+    std::string end_label = "end_loop_" + std::to_string(loop_num);
 
-        // Load byte into %cl (lower 8 bits)
-        jasm("movb    (%rax), %cl");
-        // jump to matching end label if 0
-        jasm("cmpb    $0, %cl");
-        jasm("je      " + end_label);
-    }
+    // Create a block for the start of the loop
+    BasicBlock *loopStart = BasicBlock::Create(*TheContext, start_label, mainFunction);
+    Builder->CreateBr(loopStart); // Jump to the start of the loop
 
-    break;
-    case ']':
-    {
-        int match_loop = myStack.top();
-        myStack.pop();
-        string start_label = "start_loop_";
-        start_label += to_string(match_loop);
+    // Now set the insertion point to the start of the loop
+    // Builder->SetInsertPoint(loopStart);
 
-        string end_label = "end_loop_";
-        end_label += to_string(match_loop);
+    // Load the current value at `middlePtr`
+    Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadValue");
 
-        jasm(end_label + ":");
-        // Load the pointer from -8(%rbp) into %rax
-        jasm("movq    -8(%rbp), %rax");
+    // Compare the value to 0 and branch to the end label if zero
+    Value *cond = Builder->CreateICmpEQ(currentValue, Builder->getInt8(0), "cmpZero");
+    BasicBlock *loopEnd = BasicBlock::Create(*TheContext, end_label, mainFunction);
+    Builder->CreateCondBr(cond, loopEnd, loopStart); // If zero, jump to end of loop
 
-        // Load byte into %cl (lower 8 bits)
-        jasm("movb    (%rax), %cl");
+    // Insert the end block for the loop
+    //Builder->SetInsertPoint(loopEnd);
 
-        // jump to matching start label if not 0
-        jasm("cmpb    $0, %cl");
-        jasm("jne      " + start_label);
-    }
+} break;
 
-    break;
+case ']': {
+    // Retrieve the loop number from the stack
+     int match_loop = myStack.top();
+     myStack.pop();
+
+    // // Generate unique loop labels
+     std::string start_label = "start_loop_" + std::to_string(match_loop);
+     std::string end_label = "end_loop_" + std::to_string(match_loop);
+
+    // // Create a block for the end of the loop
+
+    // // Load the current value at `middlePtr`
+     Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadValue");
+
+    // // Compare the value to 0 and branch back to the start label if not zero
+     Value *cond = Builder->CreateICmpNE(currentValue, Builder->getInt8(0), "cmpNonZero");
+     BasicBlock *loopStart = BasicBlock::Create(*TheContext, start_label, mainFunction);
+    BasicBlock *loopEnd = Builder->GetInsertBlock(); // Get the current end block
+     Builder->CreateCondBr(cond, loopStart, loopEnd); // If not zero, jump back to start
+
+
+    // // Set the insert point to the end of the loop block
+    // Builder->SetInsertPoint(loopEnd);
+
+} break;
+
+
     default:
         // non bf instruction, so we ignore
         break;
@@ -586,12 +608,12 @@ prints string vector vecrtically and ignores white space
 */
 void vprint_string_vector(vector<string> list)
 {
-    for (auto token : list){
-        if(token == " ")
-        continue;
-        cout << token<<endl;
+    for (auto token : list)
+    {
+        if (token == " ")
+            continue;
+        cout << token << endl;
     }
-        
 
     cout << endl;
 }
@@ -973,8 +995,6 @@ void bf_string_assembler(string token)
         }
     } // end seek
 
-  
-
 } // end asm_string
 
 vector<string> optimize_seek_loop(int loop_index, int seek_offset, vector<string> loop, vector<string> program)
@@ -994,7 +1014,7 @@ bool is_simple_loop2(vector<string> loop)
 {
     bool answer = true;
     // we do not count the brackets only inside ie [...]
-    for (int i = 1; i< loop.size()-1; i++)
+    for (int i = 1; i < loop.size() - 1; i++)
     {
         string t = loop[i];
         if (
@@ -1002,8 +1022,7 @@ bool is_simple_loop2(vector<string> loop)
             t != "<" &&
             !startsWith(t, "expr_simple:") &&
             t != "+" &&
-            t != "-"
-            &&
+            t != "-" &&
             t != " ")
             answer = false;
     }
@@ -1065,30 +1084,22 @@ int main(int argc, char *argv[])
     */
     asm_setup();
 
-     // Create a function to hold our code, ie main()
-    FunctionType *funcType = FunctionType::get(Builder->getInt32Ty(), false);  // Return type changed to int (i32)
-    Function *mainFunction = Function::Create(funcType, Function::ExternalLinkage, "main", *TheModule);
+    // Create a function to hold our code, ie main()
+    FunctionType *funcType = FunctionType::get(Builder->getInt32Ty(), false); // Return type changed to int (i32)
+    mainFunction = Function::Create(funcType, Function::ExternalLinkage, "main", *TheModule);
     BasicBlock *entryBlock = BasicBlock::Create(*TheContext, "entry", mainFunction);
     Builder->SetInsertPoint(entryBlock);
 
-
     // Step 1: Create an i8 array of size 10,000
     AllocaInst *arrayAlloc = Builder->CreateAlloca(
-        ArrayType::get(Builder->getInt8Ty(), 10000), nullptr, "myArray"
-    );
+        ArrayType::get(Builder->getInt8Ty(), 10000), nullptr, "myArray");
 
-   // Step 2: Calculate the pointer to the middle of the array
+    // Step 2: Calculate the pointer to the middle of the array
     Value *zero = Builder->getInt32(0);           // First dimension index
     Value *middleIndex = Builder->getInt32(5000); // Middle of the array index
-    Value *middlePtr = Builder->CreateInBoundsGEP(arrayAlloc->getAllocatedType(), arrayAlloc, {zero, middleIndex}, "middlePtr");
+    middlePtr = Builder->CreateInBoundsGEP(arrayAlloc->getAllocatedType(), arrayAlloc, {zero, middleIndex}, cell_pointer_var);
 
-    // Step 3: Store the middle pointer in a variable (optional, for later access)
-    middlePtrVar = Builder->CreateAlloca(Type::getInt8Ty(*TheContext)->getPointerTo(), nullptr, "middlePtrVar"); 
-    // Store the middle pointer in middlePtrVar
-    Builder->CreateStore(middlePtr, middlePtrVar);
-
-
-     if (!optimization_flag)
+    if (!optimization_flag)
     {
         // // begin our program compiler loop
         for (int i = 0; i < program_file.size(); i++)
@@ -1099,59 +1110,60 @@ int main(int argc, char *argv[])
     }
 
     // End the function
-    Builder->CreateRet(Builder->getInt32(0));  // Return 0
+    Builder->CreateRet(Builder->getInt32(0)); // Return 0
     // Verify the entire module
-    if (verifyModule(*TheModule, &errs())) {
+    if (verifyModule(*TheModule, &errs()))
+    {
         errs() << "Error: Module verification failed.\n";
+            TheModule->print(outs(), nullptr);
+
         return 23;
     }
 
     // Output the module IR
     TheModule->print(outs(), nullptr);
 
-
-   
-    //optimize!
-    if(optimization_flag){
-
-    vector<string> optimized_program = init_optimized_program_list(program_file);
-
-    // print program without non-instructions
-    // print_string_vector(optimized_program);
-    unordered_set<int> loop_indices = get_loop_indices(optimized_program);
-
-    // optimize all simple loops and seek loops
-    for (auto token : loop_indices)
+    // optimize!
+    if (optimization_flag)
     {
-        vector<string> loop = get_loop_string(token, optimized_program);
-        if (is_simple_loop(loop))
+
+        vector<string> optimized_program = init_optimized_program_list(program_file);
+
+        // print program without non-instructions
+        // print_string_vector(optimized_program);
+        unordered_set<int> loop_indices = get_loop_indices(optimized_program);
+
+        // optimize all simple loops and seek loops
+        for (auto token : loop_indices)
         {
-            int loop_increment = get_current_cell_change(loop);
-            optimized_program = optimize_simple_loop(token, loop_increment, loop, optimized_program);
+            vector<string> loop = get_loop_string(token, optimized_program);
+            if (is_simple_loop(loop))
+            {
+                int loop_increment = get_current_cell_change(loop);
+                optimized_program = optimize_simple_loop(token, loop_increment, loop, optimized_program);
 
-            // print_string_vector(optimized_program);
-        } // end is simple loop
+                // print_string_vector(optimized_program);
+            } // end is simple loop
 
-        if (is_seek_loop(loop))
+            if (is_seek_loop(loop))
+            {
+                int seek_offset = is_seek_loop(loop);
+
+                optimized_program = optimize_seek_loop(token, seek_offset, loop, optimized_program);
+            } // end is power two
+
+        } // end looping over loop in program list
+
+        // output the assembly
+        for (int i = 0; i < optimized_program.size(); i++)
         {
-            int seek_offset = is_seek_loop(loop);
+            string token = optimized_program[i];
+            bf_string_assembler(token);
+        }
 
-            optimized_program = optimize_seek_loop(token, seek_offset, loop, optimized_program);
-        } // end is power two
+        print_string_vector(optimized_program);
+    } // end optimized assembler
 
-    } // end looping over loop in program list
-
-    
-    // output the assembly
-    for (int i = 0; i < optimized_program.size(); i++)
-    {
-        string token = optimized_program[i];
-        bf_string_assembler(token);
-    }
-
-    print_string_vector(optimized_program);
-    }//end optimized assembler
-    
     asm_cleanup();
 
     // Close the file
