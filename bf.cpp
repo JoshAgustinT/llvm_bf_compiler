@@ -13,6 +13,7 @@ written for adv compilers course
 #include <unordered_set>
 #include <sstream>
 #include <cassert>
+#include <utility> // for std::pair
 
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
@@ -34,6 +35,8 @@ Function *mainFunction;
 Value *middlePtr;
 
 string cell_pointer_var = "middle";
+
+std::stack<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>> loopStack;
 
 vector<char> program_file;
 ofstream *output_file;
@@ -147,24 +150,50 @@ void bf_assembler(char token)
 
     case '[':
     {
-        loop_num++;
-        myStack.push(loop_num);
+        // Get the parent function to create new blocks
+        Function *TheFunction = Builder->GetInsertBlock()->getParent();
 
-        // Generate unique loop labels
-        std::string start_label = "start_loop_" + std::to_string(loop_num);
-        std::string end_label = "end_loop_" + std::to_string(loop_num);
+        // Create the loop and after-loop blocks
+        BasicBlock *LoopCondBB = BasicBlock::Create(*TheContext, "loopCond", TheFunction);
+        BasicBlock *LoopBodyBB = BasicBlock::Create(*TheContext, "loopBody", TheFunction);
+        BasicBlock *AfterBB = BasicBlock::Create(*TheContext, "afterloop", TheFunction);
+
+        // Unconditionally branch from the current block to the loop condition block
+        Builder->CreateBr(LoopCondBB);
+
+        // Set insertion point to the loop condition block
+        Builder->SetInsertPoint(LoopCondBB);
+
+        // Load the value for the loop condition
+        Value *loopVal = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "loopVal");
+
+        // Check if the value is zero; if so, branch to AfterBB, else continue to LoopBodyBB
+        Value *isZero = Builder->CreateICmpEQ(loopVal, ConstantInt::get(Type::getInt8Ty(*TheContext), 0), "loopcond");
+        Builder->CreateCondBr(isZero, AfterBB, LoopBodyBB);
+
+        // Set insertion point to the loop body block for actual operations within the loop
+        Builder->SetInsertPoint(LoopBodyBB);
+
+        // Now push LoopCondBB and AfterBB to stack for the matching ']'
+        loopStack.push({LoopCondBB, AfterBB});
     }
     break;
 
     case ']':
     {
-        // Retrieve the loop number from the stack
-        int match_loop = myStack.top();
-        myStack.pop();
+        // Pop the loop stack to get the matching start and end blocks
+        auto [LoopCondBB, AfterBB] = loopStack.top();
+        loopStack.pop();
 
-        // Generate unique loop labels based on the matched loop number
-        std::string start_label = "start_loop_" + std::to_string(match_loop);
-        std::string end_label = "end_loop_" + std::to_string(match_loop);
+        // Perform any operations needed at the end of the loop body before condition check
+        Value *loopVal = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "loopVal");
+
+        // Check the condition again and branch back to the loop start (LoopCondBB) if not zero
+        Value *isNotZero = Builder->CreateICmpNE(loopVal, ConstantInt::get(Type::getInt8Ty(*TheContext), 0), "loopcond");
+        Builder->CreateCondBr(isNotZero, LoopCondBB, AfterBB);
+
+        // Set the insertion point to AfterBB for instructions following the loop
+        Builder->SetInsertPoint(AfterBB);
     }
     break;
 
