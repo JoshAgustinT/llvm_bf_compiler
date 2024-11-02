@@ -15,10 +15,13 @@ written for adv compilers course
 #include <cassert>
 #include <utility> // for std::pair
 
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Verifier.h"
+#include "llvm/IR/IRBuilder.h"    // For IRBuilder and instruction building
+#include "llvm/IR/LLVMContext.h"  // For LLVMContext, which manages LLVM global state
+#include "llvm/IR/Module.h"       // For Module, representing a full LLVM program
+#include "llvm/IR/BasicBlock.h"   // For BasicBlock, representing code blocks
+#include "llvm/IR/Function.h"     // For Function, representing functions in LLVM IR
+#include "llvm/IR/Verifier.h"     // For verifying correctness of the generated IR
+#include "llvm/IR/Instructions.h" // For specific instructions like PHINode, LoadInst, StoreInst, etc.
 #include "llvm/IR/Type.h"
 
 using namespace std;
@@ -35,8 +38,6 @@ Function *mainFunction;
 Value *middlePtr;
 
 string cell_pointer_var = "middle";
-
-std::stack<std::pair<llvm::BasicBlock *, llvm::BasicBlock *>> loopStack;
 
 vector<char> program_file;
 ofstream *output_file;
@@ -63,27 +64,34 @@ void print_padding()
     *output_file << endl;
 }
 
+// Define stacks to manage nested loop blocks
+std::stack<llvm::BasicBlock *> loopStartStack;
+std::stack<llvm::BasicBlock *> loopCheckStack;
+std::stack<llvm::BasicBlock *> afterLoopStack;
+std::stack<llvm::BasicBlock *> loopBodyStack;
+
+stack<Value *> tapePointerStack;
 /*
 naive implementation, also easier to debug
 */
 void bf_assembler(char token)
 {
 
+    // main()
     switch (token)
     {
     case '>':
 
         // move our pointer to the right,
         {
-            Value *nextPtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(1), "moveRight");
-            middlePtr = nextPtr; // Update `middlePtr` to the new position
+            Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(1), "moveRight");
+            middlePtr = newMiddlePtr;
         }
         break;
     case '<':
         // move our pointer to the left,
         {
-            Value *prevPtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(-1), "moveLeft");
-            middlePtr = prevPtr;
+            middlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(-1), "moveLeft");
         }
         break;
     case '+':
@@ -150,52 +158,71 @@ void bf_assembler(char token)
 
     case '[':
     {
-        // Get the parent function to create new blocks
-        Function *TheFunction = Builder->GetInsertBlock()->getParent();
+        // Create loop blocks and push onto stacks
+        BasicBlock *loopStart = BasicBlock::Create(*TheContext, "loop_start", mainFunction);
+        BasicBlock *loopBody = BasicBlock::Create(*TheContext, "loop_body", mainFunction);
+        BasicBlock *loopCheck = BasicBlock::Create(*TheContext, "loop_check", mainFunction);
+        BasicBlock *afterLoop = BasicBlock::Create(*TheContext, "after_loop", mainFunction);
 
-        // Create the loop and after-loop blocks
-        BasicBlock *LoopCondBB = BasicBlock::Create(*TheContext, "loopCond", TheFunction);
-        BasicBlock *LoopBodyBB = BasicBlock::Create(*TheContext, "loopBody", TheFunction);
-        BasicBlock *AfterBB = BasicBlock::Create(*TheContext, "afterloop", TheFunction);
+        loopStartStack.push(loopStart);
+        loopCheckStack.push(loopCheck);
+        afterLoopStack.push(afterLoop);
+        loopBodyStack.push(loopBody);
 
-        // Unconditionally branch from the current block to the loop condition block
-        Builder->CreateBr(LoopCondBB);
+        tapePointerStack.push(middlePtr);
 
-        // Set insertion point to the loop condition block
-        Builder->SetInsertPoint(LoopCondBB);
+        // Initial loop check
+        Builder->CreateBr(loopStart);
+        Builder->SetInsertPoint(loopStart);
 
-        // Load the value for the loop condition
-        Value *loopVal = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "loopVal");
-
-        // Check if the value is zero; if so, branch to AfterBB, else continue to LoopBodyBB
-        Value *isZero = Builder->CreateICmpEQ(loopVal, ConstantInt::get(Type::getInt8Ty(*TheContext), 0), "loopcond");
-        Builder->CreateCondBr(isZero, AfterBB, LoopBodyBB);
-
-        // Set insertion point to the loop body block for actual operations within the loop
-        Builder->SetInsertPoint(LoopBodyBB);
-
-        // Now push LoopCondBB and AfterBB to stack for the matching ']'
-        loopStack.push({LoopCondBB, AfterBB});
+        Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
+        Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
+        Builder->CreateCondBr(isZero, afterLoop, loopBody);
+        Builder->SetInsertPoint(loopBody);
+        break;
     }
-    break;
 
+    // Handle ']'
     case ']':
     {
-        // Pop the loop stack to get the matching start and end blocks
-        auto [LoopCondBB, AfterBB] = loopStack.top();
-        loopStack.pop();
+        // Finish loop body, branch to loop check
+        BasicBlock *loopStart = loopStartStack.top();
+        BasicBlock *loopCheck = loopCheckStack.top();
+        BasicBlock *afterLoop = afterLoopStack.top();
+        BasicBlock *loopBody = loopBodyStack.top();
 
-        // Perform any operations needed at the end of the loop body before condition check
-        Value *loopVal = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "loopVal");
+        // Pop from stacks and continue in `afterLoop`
+        loopStartStack.pop();
+        loopCheckStack.pop();
+        afterLoopStack.pop();
+        loopBodyStack.pop();
 
-        // Check the condition again and branch back to the loop start (LoopCondBB) if not zero
-        Value *isNotZero = Builder->CreateICmpNE(loopVal, ConstantInt::get(Type::getInt8Ty(*TheContext), 0), "loopcond");
-        Builder->CreateCondBr(isNotZero, LoopCondBB, AfterBB);
+        Value *original_middlePtr = tapePointerStack.top();
+        tapePointerStack.pop();
 
-        // Set the insertion point to AfterBB for instructions following the loop
-        Builder->SetInsertPoint(AfterBB);
+        // Jump to loop check at the end of the loop body
+        Builder->CreateBr(loopCheck);
+
+        // Set insertion point to loop check block
+        Builder->SetInsertPoint(loopCheck);
+
+        // Re-evaluate loop condition
+        Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
+        Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
+
+        // Conditional branch: back to loop_body if non-zero, else exit
+        Builder->CreateCondBr(isZero, afterLoop, loopStart);
+
+        // Continue code generation in after_loop block
+        Builder->SetInsertPoint(afterLoop);
+        // Create a phi node for `middlePtr` to track pointer position across loop iterations
+        PHINode *phiPtr = Builder->CreatePHI(middlePtr->getType(), 2, "middle_phi");
+        phiPtr->addIncoming(original_middlePtr, loopStart); // TODO MAKE SURE THIS IS ORIGINAL middle pointer before loop.
+        phiPtr->addIncoming(middlePtr, loopCheck);          // Pointer after each iteration in loop body
+
+        middlePtr = phiPtr;
+        break;
     }
-    break;
 
     default:
         // non bf instruction, so we ignore
