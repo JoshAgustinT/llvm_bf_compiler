@@ -24,6 +24,13 @@ written for adv compilers course
 #include "llvm/IR/Instructions.h" // For specific instructions like PHINode, LoadInst, StoreInst, etc.
 #include "llvm/IR/Type.h"
 
+#include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/IPO.h>
+#include <llvm/Transforms/Utils.h>
+
+#include <llvm/Passes/PassBuilder.h>
+
 using namespace std;
 using namespace llvm;
 
@@ -34,6 +41,8 @@ static std::unique_ptr<IRBuilder<>> Builder = std::make_unique<IRBuilder<>>(*The
 static std::unique_ptr<Module> TheModule = std::make_unique<Module>("module", *TheContext);
 
 Function *mainFunction;
+
+stack<PHINode *> phiNodeStack;
 
 Value *middlePtr;
 
@@ -51,6 +60,7 @@ bool seek_flag = false;
 bool optimization_flag = false;
 string bf_file_name = "";
 
+BasicBlock *entryBlock;
 /*
 jasm, short for josh asm :] outputs to output_file.
 */
@@ -92,6 +102,7 @@ void bf_assembler(char token)
         // move our pointer to the left,
         {
             middlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(-1), "moveLeft");
+            // produces:   %moveLeft = getelementptr inbounds i8, ptr %moveRight, i32 -1
         }
         break;
     case '+':
@@ -1108,15 +1119,20 @@ int main(int argc, char *argv[])
     // Create a function to hold our code, ie main()
     FunctionType *funcType = FunctionType::get(Builder->getInt32Ty(), false); // Return type changed to int (i32)
     mainFunction = Function::Create(funcType, Function::ExternalLinkage, "main", *TheModule);
-    BasicBlock *entryBlock = BasicBlock::Create(*TheContext, "entry", mainFunction);
+    entryBlock = BasicBlock::Create(*TheContext, "entry", mainFunction);
     Builder->SetInsertPoint(entryBlock);
 
     // Step 1: Create an i8 array of size 10,000
     AllocaInst *arrayAlloc = Builder->CreateAlloca(
         ArrayType::get(Builder->getInt8Ty(), 10000), nullptr, "myArray");
 
+    // Step 2: Use CreateMemSet to initialize all elements to zero
+    Value *zero = Builder->getInt8(0);      // Create a constant zero of type i8
+    Value *size = Builder->getInt32(10000); // Size of the array in i8 elements
+
+    Builder->CreateMemSet(arrayAlloc, zero, size, Align(1), /*isVolatile=*/false);
+
     // Step 2: Calculate the pointer to the middle of the array
-    Value *zero = Builder->getInt32(0);           // First dimension index
     Value *middleIndex = Builder->getInt32(5000); // Middle of the array index
     middlePtr = Builder->CreateInBoundsGEP(arrayAlloc->getAllocatedType(), arrayAlloc, {zero, middleIndex}, cell_pointer_var);
 
@@ -1140,6 +1156,34 @@ int main(int argc, char *argv[])
 
         return 23;
     }
+
+    // Create the analysis managers.
+    // These must be declared in this order so that they are destroyed in the
+    // correct order due to inter-analysis-manager references.
+    LoopAnalysisManager LAM;
+    FunctionAnalysisManager FAM;
+    CGSCCAnalysisManager CGAM;
+    ModuleAnalysisManager MAM;
+
+    // Create the new pass manager builder.
+    // Take a look at the PassBuilder constructor parameters for more
+    // customization, e.g. specifying a TargetMachine or various debugging
+    // options.
+    PassBuilder PB;
+
+    // Register all the basic analyses with the managers.
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+
+    // Create the pass manager.
+    // This one corresponds to a typical -O2 optimization pipeline.
+    ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(OptimizationLevel::O2);
+
+    // Optimize the IR!
+    MPM.run(*TheModule, MAM);
 
     // Output the module IR
     TheModule->print(outs(), nullptr);
