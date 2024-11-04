@@ -33,14 +33,14 @@ written for adv compilers course
 
 using namespace std;
 using namespace llvm;
+GlobalVariable *globalMiddlePtr;
 
+Function *mainFunction;
 // Cursed...
 //  Initialize LLVM components
 static std::unique_ptr<LLVMContext> TheContext = std::make_unique<LLVMContext>();
 static std::unique_ptr<IRBuilder<>> Builder = std::make_unique<IRBuilder<>>(*TheContext);
 static std::unique_ptr<Module> TheModule = std::make_unique<Module>("module", *TheContext);
-
-Function *mainFunction;
 
 stack<PHINode *> phiNodeStack;
 
@@ -60,7 +60,6 @@ bool seek_flag = false;
 bool optimization_flag = false;
 string bf_file_name = "";
 
-BasicBlock *entryBlock;
 /*
 jasm, short for josh asm :] outputs to output_file.
 */
@@ -81,73 +80,83 @@ std::stack<llvm::BasicBlock *> afterLoopStack;
 std::stack<llvm::BasicBlock *> loopBodyStack;
 
 stack<Value *> tapePointerStack;
+
+std::stack<llvm::BasicBlock *> entryBlockStack;
+
 /*
 naive implementation, also easier to debug
 */
 void bf_assembler(char token)
 {
 
-    // main()
     switch (token)
     {
-    case '>':
 
-        // move our pointer to the right,
-        {
-            Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(1), "moveRight");
-            middlePtr = newMiddlePtr;
-        }
-        break;
+    case '>':
+    {
+        // Load the current pointer from the global variable
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Increment the pointer by 1 byte and save it back to the global variable
+        Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(1), "moveRight");
+        Builder->CreateStore(newMiddlePtr, globalMiddlePtr);
+    }
+    break;
+
     case '<':
-        // move our pointer to the left,
-        {
-            middlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(-1), "moveLeft");
-            // produces:   %moveLeft = getelementptr inbounds i8, ptr %moveRight, i32 -1
-        }
-        break;
+    {
+        // Load the current pointer from the global variable
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Decrement the pointer by 1 byte and save it back to the global variable
+        Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(-1), "moveLeft");
+        Builder->CreateStore(newMiddlePtr, globalMiddlePtr);
+    }
+    break;
+
     case '+':
     {
-        // load what's at that variable, then add 1 to it. note that it's an i8 operation
-        // Load the current value at `middlePtr`
-        Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadCurrent");
+        // Load the value at the current pointer location
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
 
-        // Increment by 1
-        Value *incrementedValue = Builder->CreateAdd(currentValue, Builder->getInt8(1), "increment");
+        // Increment the value by 1
+        Value *incrementedValue = Builder->CreateAdd(valueAtPointer, Builder->getInt8(1), "incrementedValue");
 
-        // Store the incremented value back at `middlePtr`
-        Builder->CreateStore(incrementedValue, middlePtr);
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(incrementedValue, loadedMiddlePtr);
     }
     break;
+
     case '-':
     {
-        // load what's at that variable, then sub 1 to it. note that it's an i8 operation
-        Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadCurrent");
+        // Load the value at the current pointer location
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
 
-        // Decrement by 1
-        Value *decrementedValue = Builder->CreateSub(currentValue, Builder->getInt8(1), "decrement");
+        // Decrement the value by 1
+        Value *decrementedValue = Builder->CreateSub(valueAtPointer, Builder->getInt8(1), "decrementedValue");
 
-        // Store the decremented value back at `middlePtr`
-        Builder->CreateStore(decrementedValue, middlePtr);
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(decrementedValue, loadedMiddlePtr);
     }
-
     break;
+
     case '.':
+    {
+        // Load the value to print
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueToPrint = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueToPrint");
 
-        // print what's at the pointer, it's an i8
-        //  Load the value to print
-        {
-            // Load the value to print
-            Value *valueToPrint = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "valueToPrint");
+        // Create a prototype for putchar (int putchar(int))
+        FunctionType *putcharType = FunctionType::get(Builder->getInt32Ty(), Builder->getInt8Ty(), false);
+        FunctionCallee putcharFunction = TheModule->getOrInsertFunction("putchar", putcharType);
 
-            // Create a prototype for putchar (int putchar(int))
-            FunctionType *putcharType = FunctionType::get(Type::getInt32Ty(*TheContext), Type::getInt8Ty(*TheContext), false);
-            FunctionCallee putcharFunction = TheModule->getOrInsertFunction("putchar", putcharType);
+        // Call putchar with the loaded value
+        Builder->CreateCall(putcharFunction, valueToPrint);
+    }
+    break;
 
-            // Call putchar with the loaded value
-            Builder->CreateCall(putcharFunction, valueToPrint);
-        }
-
-        break;
     case ',':
 
     {
@@ -162,76 +171,48 @@ void bf_assembler(char token)
         // Truncate the returned int32 to int8 if needed (for 8-bit storage)
         Value *truncatedInput = Builder->CreateTrunc(inputChar, Type::getInt8Ty(*TheContext), "truncatedInput");
 
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+
         // Store the character at the location pointed to by middlePtr
-        Builder->CreateStore(truncatedInput, middlePtr);
+        Builder->CreateStore(truncatedInput, loadedMiddlePtr);
     }
     break;
 
     case '[':
     {
-        // Create loop blocks and push onto stacks
+
         BasicBlock *loopStart = BasicBlock::Create(*TheContext, "loop_start", mainFunction);
-        BasicBlock *loopBody = BasicBlock::Create(*TheContext, "loop_body", mainFunction);
-        BasicBlock *loopCheck = BasicBlock::Create(*TheContext, "loop_check", mainFunction);
         BasicBlock *afterLoop = BasicBlock::Create(*TheContext, "after_loop", mainFunction);
 
         loopStartStack.push(loopStart);
-        loopCheckStack.push(loopCheck);
         afterLoopStack.push(afterLoop);
-        loopBodyStack.push(loopBody);
 
-        tapePointerStack.push(middlePtr);
-
-        // Initial loop check
-        Builder->CreateBr(loopStart);
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+        Value *isZero = Builder->CreateICmpEQ(valueAtPointer, Builder->getInt8(0), "is_zero");
+        Builder->CreateCondBr(isZero, afterLoop, loopStart);
         Builder->SetInsertPoint(loopStart);
 
-        Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
-        Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
-        Builder->CreateCondBr(isZero, afterLoop, loopBody);
-        Builder->SetInsertPoint(loopBody);
         break;
     }
 
     // Handle ']'
     case ']':
     {
-        // Finish loop body, branch to loop check
+
         BasicBlock *loopStart = loopStartStack.top();
-        BasicBlock *loopCheck = loopCheckStack.top();
         BasicBlock *afterLoop = afterLoopStack.top();
-        BasicBlock *loopBody = loopBodyStack.top();
 
-        // Pop from stacks and continue in `afterLoop`
         loopStartStack.pop();
-        loopCheckStack.pop();
         afterLoopStack.pop();
-        loopBodyStack.pop();
 
-        Value *original_middlePtr = tapePointerStack.top();
-        tapePointerStack.pop();
-
-        // Jump to loop check at the end of the loop body
-        Builder->CreateBr(loopCheck);
-
-        // Set insertion point to loop check block
-        Builder->SetInsertPoint(loopCheck);
-
-        // Re-evaluate loop condition
-        Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
-        Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
-
-        // Conditional branch: back to loop_body if non-zero, else exit
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+        Value *isZero = Builder->CreateICmpEQ(valueAtPointer, Builder->getInt8(0), "is_zero");
         Builder->CreateCondBr(isZero, afterLoop, loopStart);
-
-        // Continue code generation in after_loop block
         Builder->SetInsertPoint(afterLoop);
-        // Create a phi node for `middlePtr` to track pointer position across loop iterations
-        PHINode *phiPtr = Builder->CreatePHI(middlePtr->getType(), 2, "middle_phi");
-        phiPtr->addIncoming(original_middlePtr, loopStart); // TODO MAKE SURE THIS IS ORIGINAL middle pointer before loop.
-        phiPtr->addIncoming(middlePtr, loopCheck);          // Pointer after each iteration in loop body
 
-        middlePtr = phiPtr;
         break;
     }
 
@@ -246,98 +227,6 @@ bool startsWith(const std::string &str, const std::string &prefix)
     return str.compare(0, prefix.length(), prefix) == 0;
 }
 
-void asm_setup()
-{
-    // Assembly setup
-    jasm(".file	\"bf compiler\"");
-
-    jasm(".section .data");
-
-    if (optimization_flag || seek_flag)
-    {
-        // offset masks= 1,2,4,8,16
-        jasm(".p2align 5");
-        jasm(".four_offset_mask:");
-        jasm(".quad   282578783371521");
-        jasm(".quad   282578783371521");
-        jasm(".quad   282578783371521");
-        jasm(".quad  282578783371521");
-
-        jasm(".p2align 5");
-        jasm(".one_offset_mask:");
-        jasm(".quad   0");
-        jasm(".quad   0");
-        jasm(".quad   0");
-        jasm(".quad   0");
-
-        jasm(".p2align 5");
-        jasm(".two_offset_mask:");
-        jasm(".quad   281479271743489");
-        jasm(".quad   281479271743489");
-        jasm(".quad   281479271743489");
-        jasm(".quad  281479271743489");
-
-        jasm(".p2align 5");
-        jasm(".eight_offset_mask:");
-        jasm(".quad   282578800148737");
-        jasm(".quad   282578800148737");
-        jasm(".quad   282578800148737");
-        jasm(".quad   282578800148737");
-
-        jasm(".p2align 5");
-        jasm(".sixteen_offset_mask:");
-        jasm(".quad   72340172838076673");
-        jasm(".quad   282578800148737");
-        jasm(".quad   72340172838076673");
-        jasm(".quad  282578800148737");
-
-        jasm(".p2align 5");
-        jasm(".thirty_two_offset_mask:");
-        jasm(".quad   72340172838076673");
-        jasm(".quad   72340172838076673");
-        jasm(".quad   72340172838076673");
-        jasm(".quad  282578800148737");
-    }
-
-    jasm(".text");
-    jasm(".section	.text");
-    jasm(".globl	main");
-    jasm(".type	main, @function");
-    print_padding();
-
-    jasm("main:");
-
-    jasm("pushq	%rbp");
-    jasm("movq	%rsp, %rbp");
-    // Allocate 16 bytes of stack space for local variables
-    jasm("subq	$16, %rsp");
-    // Allocate 100,000 bytes with malloc
-    jasm("movl	$" + to_string(tape_size) + ", %edi");
-
-    jasm("call	malloc@PLT");
-    // Store the pointer returned by malloc in the local variable at -8(%rbp)
-    jasm("movq	%rax, -8(%rbp)");
-
-    // Calculate the address 50,000 bytes into the allocated memory
-    jasm("addq    $" + to_string(tape_size / 2) + ", %rax"); // Add the offset to %rax
-
-    // Store the adjusted pointer back at -8(%rbp)
-    jasm("movq    %rax, -8(%rbp)");
-    jasm("movq    -8(%rbp), %r13"); // keep our copy of the cell address at r13
-}
-
-void asm_cleanup()
-{
-    // Set the return value to 0 (successful completion)
-    jasm("movl    $0, %eax");
-    // Proper stack cleanup
-    jasm("movq    %rbp, %rsp");
-    // Restore the old base pointer
-    jasm("popq    %rbp");
-    // Return from the function
-    jasm("ret");
-    print_padding();
-}
 /*
 Turn  vector<char> bf program to vector<string>, to support saving complex instructions
 also this list will not contain non-instruction
@@ -794,80 +683,122 @@ we also further optimize by keeping out tape location at register r13
 
 void bf_string_assembler(string token)
 {
-    // print_padding();
 
+    //////
     if (token == ">")
-        // add one to pointer address
-        jasm("addq    $1, %r13");
+    { // Load the current pointer from the global variable
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Increment the pointer by 1 byte and save it back to the global variable
+        Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(1), "moveRight");
+        Builder->CreateStore(newMiddlePtr, globalMiddlePtr);
+    }
     if (token == "<")
-        // remove one from pointer address
-        jasm("addq    $-1, %r13");
+    {
+        // Load the current pointer from the global variable
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Decrement the pointer by 1 byte and save it back to the global variable
+        Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(-1), "moveLeft");
+        Builder->CreateStore(newMiddlePtr, globalMiddlePtr);
+    }
     if (token == "+")
-        // Add 1 to the byte
-        jasm("addb    $1, (%r13)");
+    {
+        // Load the value at the current pointer location
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+
+        // Increment the value by 1
+        Value *incrementedValue = Builder->CreateAdd(valueAtPointer, Builder->getInt8(1), "incrementedValue");
+
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(incrementedValue, loadedMiddlePtr);
+    }
 
     if (token == "-")
-        jasm("subb    $1, (%r13)");
+    {
+        // Load the value at the current pointer location
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+
+        // Decrement the value by 1
+        Value *decrementedValue = Builder->CreateSub(valueAtPointer, Builder->getInt8(1), "decrementedValue");
+
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(decrementedValue, loadedMiddlePtr);
+    }
 
     if (token == ".")
     {
+        // Load the value to print
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueToPrint = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueToPrint");
 
-        // Load the byte from the address into %al (to use with putc)
-        // jasm("movb    (%r13), %al");
+        // Create a prototype for putchar (int putchar(int))
+        FunctionType *putcharType = FunctionType::get(Builder->getInt32Ty(), Builder->getInt8Ty(), false);
+        FunctionCallee putcharFunction = TheModule->getOrInsertFunction("putchar", putcharType);
 
-        // Prepare for putc
-        // Load file descriptor for stdout into %rsi
-        jasm("movq    stdout(%rip), %rsi");
-        // Move and sign-extend byte in %al to %edi
-        jasm("movsbl  (%r13), %edi");
-
-        // Call putc to print the character
-        jasm("call    putc@PLT");
-
-        // cout << tape[tape_position];
+        // Call putchar with the loaded value
+        Builder->CreateCall(putcharFunction, valueToPrint);
     }
     if (token == ",")
     {
+        // Create a prototype for getchar (int getchar())
+        FunctionType *getcharType = FunctionType::get(Type::getInt32Ty(*TheContext), false);
+        FunctionCallee getcharFunction = TheModule->getOrInsertFunction("getchar", getcharType);
 
-        // Move the file pointer for stdin into the %rdi register
-        jasm("movq    stdin(%rip), %rdi");
+        // Call getchar to read a character from stdin
+        // Call getchar to read a character from stdin
+        Value *inputChar = Builder->CreateCall(getcharFunction, {}, "inputChar");
 
-        // Call the getc function to read a character from stdin (returned in %al)
-        jasm("call    getc@PLT");
-        // Move the byte from %al into %bl
+        // Truncate the returned int32 to int8 if needed (for 8-bit storage)
+        Value *truncatedInput = Builder->CreateTrunc(inputChar, Type::getInt8Ty(*TheContext), "truncatedInput");
 
-        // Store the byte from %bl into r13 our current cell
-        jasm("movb    %al, (%r13)");
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+
+        // Store the character at the location pointed to by middlePtr
+        Builder->CreateStore(truncatedInput, loadedMiddlePtr);
     }
     if (token == "[")
     {
 
-        loop_num++;
-        myStack.push(loop_num);
+        BasicBlock *loopStart = BasicBlock::Create(*TheContext, "loop_start", mainFunction);
+        BasicBlock *afterLoop = BasicBlock::Create(*TheContext, "after_loop", mainFunction);
 
-        string start_label = "start_loop_" + to_string(loop_num);
-        string end_label = "end_loop_" + to_string(loop_num);
+        loopStartStack.push(loopStart);
+        afterLoopStack.push(afterLoop);
 
-        // jump to matching end label if 0
-        jasm("cmpb    $0, (%r13)");
-        jasm("je      " + end_label);
-        jasm(start_label + ":");
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+        Value *isZero = Builder->CreateICmpEQ(valueAtPointer, Builder->getInt8(0), "is_zero");
+        Builder->CreateCondBr(isZero, afterLoop, loopStart);
+        Builder->SetInsertPoint(loopStart);
     }
     if (token == "]")
     {
-        int match_loop = myStack.top();
-        myStack.pop();
-        string start_label = "start_loop_" + to_string(match_loop);
-        string end_label = "end_loop_" + to_string(match_loop);
 
-        // jump to matching start label if not 0
-        jasm("cmpb    $0, (%r13)");
-        jasm("jne      " + start_label);
-        jasm(end_label + ":");
+        BasicBlock *loopStart = loopStartStack.top();
+        BasicBlock *afterLoop = afterLoopStack.top();
+
+        loopStartStack.pop();
+        afterLoopStack.pop();
+
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+        Value *isZero = Builder->CreateICmpEQ(valueAtPointer, Builder->getInt8(0), "is_zero");
+        Builder->CreateCondBr(isZero, afterLoop, loopStart);
+        Builder->SetInsertPoint(afterLoop);
     }
 
     if (startsWith(token, "expr_simple:"))
     {
+        // cout<< token<<endl;
+
+        // main()
+
+        //        expr_simple:--1:1,0:-1,
+
         string sign_of_loop;
 
         // if +, we perform loop 256-255 times
@@ -878,154 +809,66 @@ void bf_string_assembler(string token)
         if (startsWith(token, "expr_simple:-"))
             sign_of_loop = "-";
 
+        //////////////////////////////////
+
         map<int, int> simple_expr = expr_string_to_dict(token);
 
-        // 8 bit regists, AH AL BH BL CH CL DH DL
-        // ch and bl work
+        // Load the base pointer from the global variable only once
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
 
-        // save current cell contents at start of loop in rcx
+        // Load the value at the current pointer location
+        Value *p0 = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
 
-        if (sign_of_loop == "-")
-            jasm("movq    (%r13), %rcx");
+        // if (sign_of_loop == "-")
+        //     do nothing
 
         if (sign_of_loop == "+")
         {
             // input can't be more than 255 so we're good
-            jasm("movq    $256, %rcx ");
-            jasm("subq    (%r13), %rcx  ");
+
+            // Subtract the loaded value (p0) from 256
+            Value *adjustedValue = Builder->CreateSub(Builder->getInt8(256), p0, "adjustedValue");
+            // adjustedValue = Builder->CreateSub(Builder->getInt8(1), p0, "adjustedValue");
+
+            // Update p0 with the new adjusted value
+            p0 = adjustedValue;
         }
 
         for (const auto &pair : simple_expr)
         {
-            if (pair.first == 0)
-                continue;
+            // if (pair.first == 0)
+            //     continue;
 
-            // pair.first = pointer offset
-            // pair.second = cell +- change per loop
+            // Calculate the new pointer by offsetting the loaded pointer
+            Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(pair.first), "offsetPointer");
 
-            // copy address of the first loop cell
-            jasm("movq   %r13, %r12");
-            // adjust pointer by our offset
-            jasm("addq   $" + to_string(pair.first) + ", %r12");
-            // set our constant change of cell
-            jasm("movq    $" + to_string((pair.second)) + ", %r15");
-            // constant multiplied by times loop happens
-            jasm("imul   %rcx, %r15");
+            // Load the current value at the new pointer location
+            Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), newMiddlePtr, "currentValue");
 
-            jasm("addb    %r15b , (%r12)");
+            // Create a constant for pair.second (assuming it's an integer, adjust the type if needed)
+            Value *changeValue = Builder->getInt8(pair.second);
+
+            // Multiply the base value (p0) by the change amount
+            Value *multipliedValue = Builder->CreateMul(p0, changeValue, "multipliedValue");
+
+            // Add the multiplied value to the current value at newMiddlePtr
+            Value *newValue = Builder->CreateAdd(currentValue, multipliedValue, "newValue");
+
+            // Store the result back at the new pointer location
+            Builder->CreateStore(newValue, newMiddlePtr);
         }
+
         // our loop should always end in 0, this assures it, but would break
         // intentional infinite loops ¯\_(ツ)_/¯, saves us like 5 instr per loop
-        jasm("movb    $0, (%r13)");
+
+        // Load the value at the current pointer location
+        // Value *loadedMiddlePtr2 = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(Builder->getInt8(0), loadedMiddlePtr);
 
         print_padding();
     }
-
-    if (startsWith(token, "expr_seek:"))
-    {
-        print_padding();
-        loop_num++;
-
-        int seek_offset = get_expr_seek_offset(token);
-
-        if (is_power_of_two(seek_offset))
-        {
-            // cout<< seek_offset<<endl;
-
-            string start_label = "start_seek_loop_" + to_string(loop_num);
-            string end_label = "end_seek_loop_" + to_string(loop_num);
-
-            // jasm("movb    (%r13), %cl");
-            jasm("cmpb    $0, (%r13)");
-
-            jasm("je      " + end_label);
-
-            // this makes our offset masks easier to reason about (i like seeing 32)
-            // subtracting 32, so our loop can always add 32, and on first iterations will be 0.
-
-            if (seek_offset > 0)
-            {
-                jasm("addq $1, %r13");
-                jasm("subq    $32, %r13");
-            }
-            else
-            {
-                // same alignment reason, but we don't need to offset our first loop since we want to read the previous bytes
-                jasm("addq $1, %r13");
-                // jasm("addq    $32, %r13");
-            }
-
-            if (abs(seek_offset) == 4)
-                jasm("vmovdqa .four_offset_mask(%rip), %ymm0");
-            if (abs(seek_offset) == 1)
-                jasm("vmovdqa .one_offset_mask(%rip), %ymm0");
-            if (abs(seek_offset) == 2)
-                jasm("vmovdqa .two_offset_mask(%rip), %ymm0");
-            if (abs(seek_offset) == 8)
-                jasm("vmovdqa .eight_offset_mask(%rip), %ymm0");
-            if (abs(seek_offset) == 16)
-                jasm("vmovdqa .sixteen_offset_mask(%rip), %ymm0");
-            if (abs(seek_offset) == 32)
-                jasm("vmovdqa .thirty_two_offset_mask(%rip), %ymm0");
-
-            // Loop for checking bytes in chunks of 32
-            ////////////////////////////////////////////////////////////
-            jasm(start_label + ":");
-
-            if (seek_offset > 0)
-                jasm("addq    $32, %r13");
-            else
-                jasm("subq    $32, %r13"); // CHANGE IF neg i think
-
-            jasm("vpor    (%r13), %ymm0, %ymm2");
-            jasm("vpxor   %xmm1, %xmm1, %xmm1");
-            jasm("vpcmpeqb        %ymm1, %ymm2, %ymm2");
-            jasm("vpmovmskb       %ymm2, %eax");
-            jasm("testl   %eax, %eax");
-            jasm("je      " + start_label);
-
-            if (seek_offset > 0)
-
-                jasm("bsfl    %eax, %eax"); // CHANGE IF neg i think
-
-            else
-                jasm("bsrl    %eax, %eax");
-
-            jasm("addq %rax, %r13");
-
-            /////////////////////////////////////////////////////////////////
-            // save offset
-
-            jasm(end_label + ":");
-            print_padding();
-        }
-
-        // all other seek loops
-        else
-        {
-            string start_label = "start_seek_loop_" + to_string(loop_num);
-            string end_label = "end_seek_loop_" + to_string(loop_num);
-
-            //  Load byte into %cl (lower 8 bits)
-            jasm("movb    (%r13), %cl");
-            // jump to matching end label if 0
-            jasm("cmpb    $0, %cl");
-            jasm("je      " + end_label);
-
-            jasm(start_label + ":");
-
-            // remove one from pointer address
-            jasm("addq    $" + to_string(seek_offset) + ", %r13");
-
-            // Load byte into %cl (lower 8 bits)
-            jasm("movb    (%r13), %cl");
-            // jump to matching end label if 0
-            jasm("cmpb    $0, %cl");
-            jasm("jne      " + start_label);
-
-            jasm(end_label + ":");
-        }
-    } // end seek
 
 } // end asm_string
 
@@ -1102,7 +945,7 @@ int main(int argc, char *argv[])
     inputFile.close();
 
     // create our output file
-    ofstream outFile("bf.s");
+    ofstream outFile("bf.ll");
     output_file = &outFile;
 
     if (!outFile)
@@ -1111,32 +954,42 @@ int main(int argc, char *argv[])
         return 2; // Return with an error code
     }
 
-    /*
-    DONT TOUCH register r13! it's where we keep our current cell address
-    */
-    asm_setup();
-
     // Create a function to hold our code, ie main()
     FunctionType *funcType = FunctionType::get(Builder->getInt32Ty(), false); // Return type changed to int (i32)
     mainFunction = Function::Create(funcType, Function::ExternalLinkage, "main", *TheModule);
-    entryBlock = BasicBlock::Create(*TheContext, "entry", mainFunction);
+    BasicBlock *entryBlock = BasicBlock::Create(*TheContext, "entry", mainFunction);
     Builder->SetInsertPoint(entryBlock);
 
     // Step 1: Create an i8 array of size 10,000
     AllocaInst *arrayAlloc = Builder->CreateAlloca(
-        ArrayType::get(Builder->getInt8Ty(), 10000), nullptr, "myArray");
+        ArrayType::get(Builder->getInt8Ty(), 1000000), nullptr, "myArray");
 
     // Step 2: Use CreateMemSet to initialize all elements to zero
-    Value *zero = Builder->getInt8(0);      // Create a constant zero of type i8
-    Value *size = Builder->getInt32(10000); // Size of the array in i8 elements
+    Value *zero = Builder->getInt8(0);        // Create a constant zero of type i8
+    Value *size = Builder->getInt32(1000000); // Size of the array in i8 elements
 
     Builder->CreateMemSet(arrayAlloc, zero, size, Align(1), /*isVolatile=*/false);
 
     // Step 2: Calculate the pointer to the middle of the array
-    Value *middleIndex = Builder->getInt32(5000); // Middle of the array index
+    Value *middleIndex = Builder->getInt32(500000); // Middle of the array index
     middlePtr = Builder->CreateInBoundsGEP(arrayAlloc->getAllocatedType(), arrayAlloc, {zero, middleIndex}, cell_pointer_var);
 
-    if (!optimization_flag)
+    // Step 5: Create a global variable to hold the pointer to the middle of the array
+    globalMiddlePtr = new GlobalVariable(
+        *TheModule,                                                     // Module
+        Builder->getInt8Ty()->getPointerTo(),                           // Type: pointer to i8
+        false,                                                          // isConstant
+        GlobalValue::ExternalLinkage,                                   // Linkage
+        ConstantPointerNull::get(Builder->getInt8Ty()->getPointerTo()), // Initialize to null
+        "globalMiddlePtr"                                               // Name
+    );
+
+    // Step 6: Store the pointer into the global variable
+    Builder->CreateStore(middlePtr, globalMiddlePtr);
+
+    // Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+
+    if (0)
     {
         // // begin our program compiler loop
         for (int i = 0; i < program_file.size(); i++)
@@ -1146,7 +999,48 @@ int main(int argc, char *argv[])
         }
     }
 
-    // End the function
+    // optimize!
+    if (1)
+    {
+
+        vector<string> optimized_program = init_optimized_program_list(program_file);
+
+        // print program without non-instructions
+        // print_string_vector(optimized_program);
+        unordered_set<int> loop_indices = get_loop_indices(optimized_program);
+
+        // optimize all simple loops and seek loops
+        for (auto token : loop_indices)
+        {
+            vector<string> loop = get_loop_string(token, optimized_program);
+            if (is_simple_loop(loop))
+            {
+                int loop_increment = get_current_cell_change(loop);
+                optimized_program = optimize_simple_loop(token, loop_increment, loop, optimized_program);
+
+                // print_string_vector(optimized_program);
+            } // end is simple loop
+
+            if (is_seek_loop(loop))
+            {
+                int seek_offset = is_seek_loop(loop);
+
+                //  optimized_program = optimize_seek_loop(token, seek_offset, loop, optimized_program);
+            } // end is power two
+
+        } // end looping over loop in program list
+
+        // output the assembly
+        for (int i = 0; i < optimized_program.size(); i++)
+        {
+            string token = optimized_program[i];
+            bf_string_assembler(token);
+        }
+
+        // print_string_vector(optimized_program);
+    } // end optimized assembler
+
+    //  End the function
     Builder->CreateRet(Builder->getInt32(0)); // Return 0
     // Verify the entire module
     if (verifyModule(*TheModule, &errs()))
@@ -1186,50 +1080,14 @@ int main(int argc, char *argv[])
     MPM.run(*TheModule, MAM);
 
     // Output the module IR
-    TheModule->print(outs(), nullptr);
+    // TheModule->print(outs(), nullptr);
 
-    // optimize!
-    if (optimization_flag)
-    {
+    std::string irString;
+    llvm::raw_string_ostream irStream(irString);
+    TheModule->print(irStream, nullptr); // This will print the IR to `irStream`, filling `irString`.
 
-        vector<string> optimized_program = init_optimized_program_list(program_file);
-
-        // print program without non-instructions
-        // print_string_vector(optimized_program);
-        unordered_set<int> loop_indices = get_loop_indices(optimized_program);
-
-        // optimize all simple loops and seek loops
-        for (auto token : loop_indices)
-        {
-            vector<string> loop = get_loop_string(token, optimized_program);
-            if (is_simple_loop(loop))
-            {
-                int loop_increment = get_current_cell_change(loop);
-                optimized_program = optimize_simple_loop(token, loop_increment, loop, optimized_program);
-
-                // print_string_vector(optimized_program);
-            } // end is simple loop
-
-            if (is_seek_loop(loop))
-            {
-                int seek_offset = is_seek_loop(loop);
-
-                optimized_program = optimize_seek_loop(token, seek_offset, loop, optimized_program);
-            } // end is power two
-
-        } // end looping over loop in program list
-
-        // output the assembly
-        for (int i = 0; i < optimized_program.size(); i++)
-        {
-            string token = optimized_program[i];
-            bf_string_assembler(token);
-        }
-
-        print_string_vector(optimized_program);
-    } // end optimized assembler
-
-    asm_cleanup();
+    // Step 2: Use the captured IR string as needed
+    jasm(irString.c_str()); // Assuming jasm accepts a C-string
 
     // Close the file
     outFile.close();
