@@ -186,7 +186,11 @@ void bf_assembler(char token)
         loopStartStack.push(loopStart);
         afterLoopStack.push(afterLoop);
 
-        BasicBlock *entryBlock = Builder->GetInsertBlock();
+        // Basic block before we enter [
+
+        BasicBlock * entryBlock = Builder->GetInsertBlock();
+
+        
 
         Builder->SetInsertPoint(entryBlock);
         // Initial loop check
@@ -194,10 +198,9 @@ void bf_assembler(char token)
         Builder->SetInsertPoint(loopStart);
 
         PHINode *phiPtr = Builder->CreatePHI(middlePtr->getType(), 2, "middle_phi");
-        phiNodeStack.push(phiPtr);
-        middlePtr = phiPtr;
-
         phiPtr->addIncoming(middlePtr, entryBlock);
+        middlePtr = phiPtr;
+        phiNodeStack.push(phiPtr);
 
         break;
     }
@@ -213,6 +216,7 @@ void bf_assembler(char token)
         loopStartStack.pop();
         afterLoopStack.pop();
 
+
         PHINode *phiPtr = phiNodeStack.top();
         phiNodeStack.pop();
 
@@ -225,6 +229,13 @@ void bf_assembler(char token)
         // Conditional branch: back to loop_body if non-zero, else exit
         Builder->CreateCondBr(isZero, afterLoop, loopStart);
         Builder->SetInsertPoint(afterLoop);
+
+        ///
+        // if (loopStartStack.size() == 0)
+        // {
+        //     while (entryBlockStack.size() != 0)
+        //         entryBlockStack.pop();
+        // }
 
         break;
     }
