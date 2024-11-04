@@ -33,14 +33,14 @@ written for adv compilers course
 
 using namespace std;
 using namespace llvm;
+GlobalVariable *globalMiddlePtr;
 
+Function *mainFunction;
 // Cursed...
 //  Initialize LLVM components
 static std::unique_ptr<LLVMContext> TheContext = std::make_unique<LLVMContext>();
 static std::unique_ptr<IRBuilder<>> Builder = std::make_unique<IRBuilder<>>(*TheContext);
 static std::unique_ptr<Module> TheModule = std::make_unique<Module>("module", *TheContext);
-
-Function *mainFunction;
 
 stack<PHINode *> phiNodeStack;
 
@@ -92,115 +92,136 @@ void bf_assembler(char token)
     // main()
     switch (token)
     {
-    case '>':
 
-        // move our pointer to the right,
-        {
-            Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(1), "moveRight");
-            middlePtr = newMiddlePtr;
-        }
-        break;
+    case '>':
+    {
+        // Load the current pointer from the global variable
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Increment the pointer by 1 byte and save it back to the global variable
+        Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(1), "moveRight");
+        Builder->CreateStore(newMiddlePtr, globalMiddlePtr);
+    }
+    break;
+
     case '<':
-        // move our pointer to the left,
-        {
-            middlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), middlePtr, Builder->getInt32(-1), "moveLeft");
-            // produces:   %moveLeft = getelementptr inbounds i8, ptr %moveRight, i32 -1
-        }
-        break;
+    {
+        // Load the current pointer from the global variable
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Decrement the pointer by 1 byte and save it back to the global variable
+        Value *newMiddlePtr = Builder->CreateInBoundsGEP(Builder->getInt8Ty(), loadedMiddlePtr, Builder->getInt32(-1), "moveLeft");
+        Builder->CreateStore(newMiddlePtr, globalMiddlePtr);
+    }
+    break;
+
     case '+':
     {
-        // Load the current value at `middlePtr`
-        Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadCurrent");
+        // Load the value at the current pointer location
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
 
-        // Check if current value is 255
-        Value *isMax = Builder->CreateICmpEQ(currentValue, Builder->getInt8(255), "isMax");
+        // Increment the value by 1
+        Value *incrementedValue = Builder->CreateAdd(valueAtPointer, Builder->getInt8(1), "incrementedValue");
 
-        // If it's 255, set to 0; otherwise, increment by 1
-        Value *incrementedValue = Builder->CreateAdd(currentValue, Builder->getInt8(1), "increment");
-        Value *wrappedValue = Builder->CreateSelect(isMax, Builder->getInt8(0), incrementedValue, "wrapAround");
-
-        // Store the result back at `middlePtr`
-        Builder->CreateStore(wrappedValue, middlePtr);
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(incrementedValue, loadedMiddlePtr);
     }
     break;
 
     case '-':
     {
-        // Load the current value at `middlePtr`
-        Value *currentValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "loadCurrent");
+        // Load the value at the current pointer location
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
 
-        // Check if current value is 0
-        Value *isZero = Builder->CreateICmpEQ(currentValue, Builder->getInt8(0), "isZero");
+        // Decrement the value by 1
+        Value *decrementedValue = Builder->CreateSub(valueAtPointer, Builder->getInt8(1), "decrementedValue");
 
-        // If it's 0, set to 255; otherwise, decrement by 1
-        Value *decrementedValue = Builder->CreateSub(currentValue, Builder->getInt8(1), "decrement");
-        Value *wrappedValue = Builder->CreateSelect(isZero, Builder->getInt8(255), decrementedValue, "wrapAround");
-
-        // Store the result back at `middlePtr`
-        Builder->CreateStore(wrappedValue, middlePtr);
+        // Store the updated value back to the pointer location
+        Builder->CreateStore(decrementedValue, loadedMiddlePtr);
     }
     break;
 
     case '.':
+    {
+        // Load the value to print
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        Value *valueToPrint = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueToPrint");
 
-        // print what's at the pointer, it's an i8
-        //  Load the value to print
-        {
-            // Load the value to print
-            Value *valueToPrint = Builder->CreateLoad(Type::getInt8Ty(*TheContext), middlePtr, "valueToPrint");
+        // Create a prototype for putchar (int putchar(int))
+        FunctionType *putcharType = FunctionType::get(Builder->getInt32Ty(), Builder->getInt8Ty(), false);
+        FunctionCallee putcharFunction = TheModule->getOrInsertFunction("putchar", putcharType);
 
-            // Create a prototype for putchar (int putchar(int))
-            FunctionType *putcharType = FunctionType::get(Type::getInt32Ty(*TheContext), Type::getInt8Ty(*TheContext), false);
-            FunctionCallee putcharFunction = TheModule->getOrInsertFunction("putchar", putcharType);
+        // Call putchar with the loaded value
+        Builder->CreateCall(putcharFunction, valueToPrint);
+    }
+    break;
 
-            // Call putchar with the loaded value
-            Builder->CreateCall(putcharFunction, valueToPrint);
-        }
-
-        break;
     case ',':
 
     {
-        // Create a prototype for getchar (int getchar())
-        FunctionType *getcharType = FunctionType::get(Type::getInt32Ty(*TheContext), false);
-        FunctionCallee getcharFunction = TheModule->getOrInsertFunction("getchar", getcharType);
+        // // Create a prototype for getchar (int getchar())
+        // FunctionType *getcharType = FunctionType::get(Type::getInt32Ty(*TheContext), false);
+        // FunctionCallee getcharFunction = TheModule->getOrInsertFunction("getchar", getcharType);
 
-        // Call getchar to read a character from stdin
-        // Call getchar to read a character from stdin
-        Value *inputChar = Builder->CreateCall(getcharFunction, {}, "inputChar");
+        // // Call getchar to read a character from stdin
+        // // Call getchar to read a character from stdin
+        // Value *inputChar = Builder->CreateCall(getcharFunction, {}, "inputChar");
 
-        // Truncate the returned int32 to int8 if needed (for 8-bit storage)
-        Value *truncatedInput = Builder->CreateTrunc(inputChar, Type::getInt8Ty(*TheContext), "truncatedInput");
+        // // Truncate the returned int32 to int8 if needed (for 8-bit storage)
+        // Value *truncatedInput = Builder->CreateTrunc(inputChar, Type::getInt8Ty(*TheContext), "truncatedInput");
 
-        // Store the character at the location pointed to by middlePtr
-        Builder->CreateStore(truncatedInput, middlePtr);
+        // // Store the character at the location pointed to by middlePtr
+        // Builder->CreateStore(truncatedInput, middlePtr);
     }
     break;
 
     case '[':
     {
-        // Create loop blocks and push onto stacks
+
         BasicBlock *loopStart = BasicBlock::Create(*TheContext, "loop_start", mainFunction);
         BasicBlock *afterLoop = BasicBlock::Create(*TheContext, "after_loop", mainFunction);
 
         loopStartStack.push(loopStart);
         afterLoopStack.push(afterLoop);
 
-        // Basic block before we enter [
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+        Value *isZero = Builder->CreateICmpEQ(valueAtPointer, Builder->getInt8(0), "is_zero");
+        Builder->CreateCondBr(isZero, afterLoop, loopStart);
 
-        BasicBlock * entryBlock = Builder->GetInsertBlock();
-
-        
-
-        Builder->SetInsertPoint(entryBlock);
-        // Initial loop check
-        Builder->CreateBr(loopStart);
         Builder->SetInsertPoint(loopStart);
+        // BasicBlock *checkBlock = BasicBlock::Create(*TheContext, "check", mainFunction);
+        // BasicBlock *afterLoop2 = BasicBlock::Create(*TheContext, "no_loop", mainFunction);
 
-        PHINode *phiPtr = Builder->CreatePHI(middlePtr->getType(), 2, "middle_phi");
-        phiPtr->addIncoming(middlePtr, entryBlock);
-        middlePtr = phiPtr;
-        phiNodeStack.push(phiPtr);
+        // // Create loop blocks and push onto stacks
+        // BasicBlock *loopStart = BasicBlock::Create(*TheContext, "loop_start", mainFunction);
+        // BasicBlock *afterLoop = BasicBlock::Create(*TheContext, "after_loop", mainFunction);
+
+        // loopStartStack.push(loopStart);
+        // afterLoopStack.push(afterLoop);
+        // loopCheckStack.push(afterLoop2);
+
+        // BasicBlock *entryBlock = Builder->GetInsertBlock();
+        // Builder->SetInsertPoint(entryBlock);
+
+        // Builder->CreateBr(checkBlock);
+        // Builder->SetInsertPoint(checkBlock);
+        // Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
+        // Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
+
+        // // Conditional branch: back to loop_body if non-zero, else exit
+        // Builder->CreateCondBr(isZero, afterLoop2, loopStart);
+        // // Builder->SetInsertPoint(afterLoop2);
+        // // if true continue set Insert here!!!!
+
+        // Builder->SetInsertPoint(loopStart);
+        // PHINode *phiPtr = Builder->CreatePHI(middlePtr->getType(), 2, "middle_phi");
+        // phiPtr->addIncoming(middlePtr, checkBlock);
+        // middlePtr = phiPtr;
+        // phiNodeStack.push(phiPtr);
 
         break;
     }
@@ -208,33 +229,54 @@ void bf_assembler(char token)
     // Handle ']'
     case ']':
     {
-        // Finish loop body, branch to loop check
+
         BasicBlock *loopStart = loopStartStack.top();
         BasicBlock *afterLoop = afterLoopStack.top();
-
-        // Pop from stacks and continue in `afterLoop`
+        // BasicBlock *afterLoop2 = loopCheckStack.top();
+        // // Pop from stacks and continue in `afterLoop`
         loopStartStack.pop();
         afterLoopStack.pop();
+        // loopCheckStack.pop();
 
+        //BasicBlock *loop = BasicBlock::Create(*TheContext, "check", mainFunction);
+        // BasicBlock *skip_loop = BasicBlock::Create(*TheContext, "no_loop", mainFunction);
 
-        PHINode *phiPtr = phiNodeStack.top();
-        phiNodeStack.pop();
-
-        phiPtr->addIncoming(middlePtr, Builder->GetInsertBlock());
-
-        // Re-evaluate loop condition
-        Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
-        Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
-
-        // Conditional branch: back to loop_body if non-zero, else exit
+        Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
+        // Load the value at the pointer
+        Value *valueAtPointer = Builder->CreateLoad(Builder->getInt8Ty(), loadedMiddlePtr, "valueAtPointer");
+        Value *isZero = Builder->CreateICmpEQ(valueAtPointer, Builder->getInt8(0), "is_zero");
         Builder->CreateCondBr(isZero, afterLoop, loopStart);
-        Builder->SetInsertPoint(afterLoop);
+         Builder->SetInsertPoint(afterLoop);
 
-        ///
-        // if (loopStartStack.size() == 0)
+        // // Finish loop body, branch to loop check
+        // BasicBlock *loopStart = loopStartStack.top();
+        // BasicBlock *afterLoop = afterLoopStack.top();
+        // BasicBlock *afterLoop2 = loopCheckStack.top();
+        // // Pop from stacks and continue in `afterLoop`
+        // loopStartStack.pop();
+        // afterLoopStack.pop();
+        // loopCheckStack.pop();
+
+        // PHINode *phiPtr = phiNodeStack.top();
+        // phiNodeStack.pop();
+
+        // phiPtr->addIncoming(middlePtr, Builder->GetInsertBlock());
+
+        // // Re-evaluate loop condition
+        // Value *cellValue = Builder->CreateLoad(Builder->getInt8Ty(), middlePtr, "cell_value");
+        // Value *isZero = Builder->CreateICmpEQ(cellValue, Builder->getInt8(0), "is_zero");
+
+        // // Conditional branch: back to loop_body if non-zero, else exit
+        // Builder->CreateCondBr(isZero, afterLoop, loopStart);
+        // Builder->SetInsertPoint(afterLoop);
+
+        // if (loopStart->size() == 0)
+        //     Builder->SetInsertPoint(afterLoop2);
+        // else
         // {
-        //     while (entryBlockStack.size() != 0)
-        //         entryBlockStack.pop();
+        //     Builder->SetInsertPoint(afterLoop2);
+        //     Builder->CreateRet(Builder->getInt32(0)); // Return 0
+        //     Builder->SetInsertPoint(afterLoop);
         // }
 
         break;
@@ -1125,9 +1167,6 @@ int main(int argc, char *argv[])
     FunctionType *funcType = FunctionType::get(Builder->getInt32Ty(), false); // Return type changed to int (i32)
     mainFunction = Function::Create(funcType, Function::ExternalLinkage, "main", *TheModule);
     BasicBlock *entryBlock = BasicBlock::Create(*TheContext, "entry", mainFunction);
-
-    entryBlockStack.push(entryBlock);
-
     Builder->SetInsertPoint(entryBlock);
 
     // Step 1: Create an i8 array of size 10,000
@@ -1143,6 +1182,21 @@ int main(int argc, char *argv[])
     // Step 2: Calculate the pointer to the middle of the array
     Value *middleIndex = Builder->getInt32(500000); // Middle of the array index
     middlePtr = Builder->CreateInBoundsGEP(arrayAlloc->getAllocatedType(), arrayAlloc, {zero, middleIndex}, cell_pointer_var);
+
+    // Step 5: Create a global variable to hold the pointer to the middle of the array
+    globalMiddlePtr = new GlobalVariable(
+        *TheModule,                                                     // Module
+        Builder->getInt8Ty()->getPointerTo(),                           // Type: pointer to i8
+        false,                                                          // isConstant
+        GlobalValue::ExternalLinkage,                                   // Linkage
+        ConstantPointerNull::get(Builder->getInt8Ty()->getPointerTo()), // Initialize to null
+        "globalMiddlePtr"                                               // Name
+    );
+
+    // Step 6: Store the pointer into the global variable
+    Builder->CreateStore(middlePtr, globalMiddlePtr);
+
+    // Value *loadedMiddlePtr = Builder->CreateLoad(Builder->getInt8Ty()->getPointerTo(), globalMiddlePtr, "loadedMiddlePtr");
 
     if (!optimization_flag)
     {
@@ -1193,7 +1247,7 @@ int main(int argc, char *argv[])
 
     // Create the pass manager.
     // This one corresponds to a typical -O2 optimization pipeline.
-    ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(OptimizationLevel::O0);
+    ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(OptimizationLevel::O2);
 
     // Optimize the IR!
     MPM.run(*TheModule, MAM);
